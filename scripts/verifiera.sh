@@ -28,7 +28,7 @@ echo "  /felanmalan utan inloggning -> HTTP $KOD"
 
 rubrik "IAM: rolltilldelningar i $RG"
 az role assignment list --all \
-  --query "[?contains(scope, '/resourceGroups/$RG')].{roll:roleDefinitionName, vem:principalName, typ:principalType, scope:scope}" -o table
+  --query "[?ends_with(scope, '/$RG') || contains(scope, '/$RG/')].{roll:roleDefinitionName, vem:principalName || principalId, typ:principalType, scope:scope}" -o table
 
 rubrik "Storage: säkerhetsinställningar för $DATA"
 az storage account show -n "$DATA" -g "$RG" \
