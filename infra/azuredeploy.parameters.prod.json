@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "miljo": {
+      "value": "prod"
+    },
+    "location": {
+      "value": "swedencentral"
+    },
+    "anvandarnamn": {
+      "value": "adrianahlborg"
+    },
+    "dataLopnummer": {
+      "value": "01"
+    },
+    "hostLopnummer": {
+      "value": "02"
+    },
+    "dataSku": {
+      "value": "Standard_ZRS"
+    },
+    "avdelning": {
+      "value": "forvaltning"
+    },
+    "fastighet": {
+      "value": "gemensam"
+    },
+    "maxInstanser": {
+      "value": 40
+    },
+    "instansMinne": {
+      "value": 2048
+    },
+    "pythonVersion": {
+      "value": "3.11"
+    },
+    "zonRedundans": {
+      "value": false
+    },
+    "natGateway": {
+      "value": false
+    },
+    "budgetBelopp": {
+      "value": 2500
+    },
+    "budgetEpost": {
+      "value": "adrianahlborg404@gmail.com"
+    },
+    "budgetStartdatum": {
+      "value": "2026-10-01T00:00:00Z"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "arendeId": { "type": "string" },
+    "skapad": { "type": "string" },
+    "rubrik": { "type": "string" },
+    "beskrivning": { "type": "string" },
+    "kategori": { "type": "string" },
+    "kategoriNamn": { "type": "string" },
+    "akut": { "type": "boolean" },
+    "fastighet": { "type": "string" },
+    "lagenhet": { "type": "string" },
+    "hyresgastId": { "type": "string" },
+    "hyresgastNamn": { "type": "string" },
+    "bildBlob": { "type": "string" },
+    "status": { "type": "string" },
+    "miljo": { "type": "string" }
+  },
+  "required": [ "arendeId", "rubrik", "kategori", "akut", "fastighet" ]
+}

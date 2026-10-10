@@ -1,0 +1,825 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "beskrivning": "Nordvik Fastigheter AB - hyresgastportal med felanmalan. Serverless (Azure Functions Flex Consumption) med VNet-integration, privat lagring via private endpoint, managed identity, RBAC enligt least privilege, taggar och kostnadsbudget. Hela miljon aterskapas fran repot med scripts/deploy.sh.",
+    "forfattare": "Adrian Ahlborg"
+  },
+  "parameters": {
+    "miljo": {
+      "type": "string",
+      "defaultValue": "prod",
+      "allowedValues": [ "prod", "test", "demo" ],
+      "metadata": { "description": "Miljo. Styr namnsuffix och taggen miljo, sa att en test- eller demomiljo kan resas bredvid prod." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "swedencentral",
+      "metadata": { "description": "Region for alla resurser." }
+    },
+    "anvandarnamn": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 13,
+      "metadata": { "description": "Ditt anvandarnamn, sma bokstaver och siffror. Ingar i globalt unika namn (storage och Function App)." }
+    },
+    "dataLopnummer": {
+      "type": "string",
+      "defaultValue": "01",
+      "minLength": 2,
+      "maxLength": 2,
+      "metadata": { "description": "Lopnummer for storage-kontot med anmalningar, bilder och kontrakt." }
+    },
+    "hostLopnummer": {
+      "type": "string",
+      "defaultValue": "02",
+      "minLength": 2,
+      "maxLength": 2,
+      "metadata": { "description": "Lopnummer for Function-appens eget storage-konto (kodpaket och korningsdata, inga personuppgifter)." }
+    },
+    "dataSku": {
+      "type": "string",
+      "defaultValue": "Standard_ZRS",
+      "allowedValues": [ "Standard_LRS", "Standard_ZRS", "Standard_GRS" ],
+      "metadata": { "description": "Redundans for datalagringen. ZRS i prod (taler att en zon faller bort), LRS racker for test." }
+    },
+    "avdelning": {
+      "type": "string",
+      "defaultValue": "forvaltning",
+      "metadata": { "description": "Tagg for kostnadsuppfoljning per avdelning." }
+    },
+    "fastighet": {
+      "type": "string",
+      "defaultValue": "gemensam",
+      "metadata": { "description": "Tagg for kostnadsuppfoljning per fastighet. Portalen delas av alla fastigheter, darfor 'gemensam'." }
+    },
+    "maxInstanser": {
+      "type": "int",
+      "defaultValue": 40,
+      "minValue": 40,
+      "maxValue": 1000,
+      "metadata": { "description": "Tak for utskalning. 40 ar lagsta tillatna vardet och racker gott for 300 anmalningar per timme." }
+    },
+    "instansMinne": {
+      "type": "int",
+      "defaultValue": 2048,
+      "allowedValues": [ 2048, 4096 ],
+      "metadata": { "description": "Minne per instans i MB." }
+    },
+    "pythonVersion": {
+      "type": "string",
+      "defaultValue": "3.11",
+      "allowedValues": [ "3.11", "3.12" ],
+      "metadata": { "description": "Python-version for appen." }
+    },
+    "zonRedundans": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": { "description": "Gor Function-planen zonredundant. Kraver ZRS for hostlagringen, vilket templaten da valjer automatiskt." }
+    },
+    "natGateway": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": { "description": "Skapa NAT gateway for utgaende trafik fran Function-subnatet (fast utgaende IP). Kostar extra, darfor av som standard." }
+    },
+    "flowUrl": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": { "description": "HTTP-URL:en fran Power Automate-flodets trigger. Hemlig (innehaller signatur), skickas in vid deploy och committas aldrig." }
+    },
+    "authClientId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "Application (client) ID for appregistreringen i Entra ID. Tom = inloggning inte aktiverad (forsta deploy). Satts av deploy.sh." }
+    },
+    "forvaltareGroupId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "Objekt-ID for Entra-gruppen grp-nordvik-forvaltare. Satts av deploy.sh." }
+    },
+    "ekonomiGroupId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "Objekt-ID for Entra-gruppen grp-nordvik-ekonomi. Satts av deploy.sh." }
+    },
+    "adminIpAdress": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "Valfri publik IP som tillfalligt far na datalagringen (for felsokning). Tom = lagringen ar helt stangd for internet." }
+    },
+    "budgetBelopp": {
+      "type": "int",
+      "defaultValue": 2500,
+      "metadata": { "description": "Manadsbudget i prenumerationens faktureringsvaluta." }
+    },
+    "budgetEpost": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": { "description": "E-post for budgetlarm. Tom = ingen budget skapas." }
+    },
+    "budgetStartdatum": {
+      "type": "string",
+      "defaultValue": "2026-10-01T00:00:00Z",
+      "metadata": { "description": "Forsta dagen i en manad. Fast varde, eftersom en budgets startdatum inte kan andras efterat." }
+    }
+  },
+  "variables": {
+    "suffix": "[if(equals(parameters('miljo'), 'prod'), '', concat('-', parameters('miljo')))]",
+    "anv": "[toLower(parameters('anvandarnamn'))]",
+
+    "vnetName": "[concat('vnet-nordvik', variables('suffix'))]",
+    "vnetPrefix": "10.40.0.0/16",
+    "snetFuncName": "snet-nordvik-func",
+    "snetFuncPrefix": "10.40.1.0/26",
+    "snetPeName": "snet-nordvik-pe",
+    "snetPePrefix": "10.40.2.0/27",
+    "nsgFuncName": "[concat('nsg-nordvik-func', variables('suffix'))]",
+    "nsgPeName": "[concat('nsg-nordvik-pe', variables('suffix'))]",
+    "natName": "[concat('ng-nordvik', variables('suffix'))]",
+    "natPipName": "[concat('pip-nordvik-nat', variables('suffix'))]",
+
+    "dataStorageName": "[concat('stnordvik', variables('anv'), parameters('dataLopnummer'))]",
+    "hostStorageName": "[concat('stnordvik', variables('anv'), parameters('hostLopnummer'))]",
+    "hostStorageSku": "[if(parameters('zonRedundans'), 'Standard_ZRS', 'Standard_LRS')]",
+    "containerFelanmalan": "felanmalningar",
+    "containerKontrakt": "kontrakt",
+    "containerAppPaket": "app-package",
+    "dataBlobUrl": "[concat('https://', variables('dataStorageName'), '.blob.', environment().suffixes.storage, '/')]",
+
+    "peName": "[concat('pe-nordvik-blob', variables('suffix'))]",
+    "privateDnsZoneName": "[concat('privatelink.blob.', environment().suffixes.storage)]",
+
+    "planName": "[concat('asp-nordvik-felanmalan', variables('suffix'))]",
+    "funcName": "[concat('func-nordvik-felanmalan', variables('suffix'), '-', variables('anv'))]",
+    "budgetName": "[concat('budget-nordvik', variables('suffix'))]",
+
+    "taggar": {
+      "foretag": "Nordvik Fastigheter AB",
+      "projekt": "hyresgastportal",
+      "miljo": "[parameters('miljo')]",
+      "avdelning": "[parameters('avdelning')]",
+      "fastighet": "[parameters('fastighet')]",
+      "skapad-av": "arm-template"
+    },
+
+    "rollBlobDataOwner": "b7e6dc6d-f1e8-4753-8033-0f276bb0955b",
+    "rollBlobDataContributor": "ba92f5b4-2d11-453d-a403-e96b0029c9fe",
+    "rollBlobDataReader": "2a2b9908-6ea1-4ae2-8e65-a410df84e7d1",
+    "rollCostManagementReader": "72fafb9e-0641-4937-9268-a91bfd8191a3",
+
+    "dataIpRegler": "[if(empty(parameters('adminIpAdress')), createArray(), createArray(createObject('value', parameters('adminIpAdress'), 'action', 'Allow')))]",
+    "akutaKategorier": "varme,vatten,las"
+  },
+  "resources": [
+    {
+      "comments": "NSG for Function-appens integrationssubnat. Bara HTTPS ut: till private endpoint-subnatet och till internet (Power Automate, Entra ID). Inget inkommande fran internet.",
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('nsgFuncName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "Allow-Out-Https-Till-Lagring",
+            "properties": {
+              "priority": 100,
+              "direction": "Outbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "[variables('snetFuncPrefix')]",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "[variables('snetPePrefix')]",
+              "destinationPortRange": "443"
+            }
+          },
+          {
+            "name": "Allow-Out-Https-Internet",
+            "properties": {
+              "priority": 110,
+              "direction": "Outbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "[variables('snetFuncPrefix')]",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "Internet",
+              "destinationPortRange": "443"
+            }
+          },
+          {
+            "name": "Deny-Out-Internet-Ovrigt",
+            "properties": {
+              "priority": 4000,
+              "direction": "Outbound",
+              "access": "Deny",
+              "protocol": "*",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "Internet",
+              "destinationPortRange": "*"
+            }
+          },
+          {
+            "name": "Deny-In-Internet",
+            "properties": {
+              "priority": 4000,
+              "direction": "Inbound",
+              "access": "Deny",
+              "protocol": "*",
+              "sourceAddressPrefix": "Internet",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "comments": "NSG for private endpoint-subnatet. Endast Function-subnatet far na lagringen, och bara pa 443.",
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('nsgPeName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "Allow-In-Https-Fran-Func",
+            "properties": {
+              "priority": 100,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "[variables('snetFuncPrefix')]",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "[variables('snetPePrefix')]",
+              "destinationPortRange": "443"
+            }
+          },
+          {
+            "name": "Deny-In-Allt-Annat",
+            "properties": {
+              "priority": 4000,
+              "direction": "Inbound",
+              "access": "Deny",
+              "protocol": "*",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('natGateway')]",
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('natPipName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "sku": { "name": "Standard" },
+      "properties": {
+        "publicIPAllocationMethod": "Static"
+      }
+    },
+    {
+      "condition": "[parameters('natGateway')]",
+      "type": "Microsoft.Network/natGateways",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('natName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "sku": { "name": "Standard" },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', variables('natPipName'))]"
+      ],
+      "properties": {
+        "idleTimeoutInMinutes": 4,
+        "publicIpAddresses": [
+          { "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('natPipName'))]" }
+        ]
+      }
+    },
+    {
+      "comments": "VNet med tva subnat: ett delegerat till Flex Consumption (VNet-integration) och ett for private endpoints.",
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgFuncName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgPeName'))]",
+        "[resourceId('Microsoft.Network/natGateways', variables('natName'))]"
+      ],
+      "properties": {
+        "addressSpace": { "addressPrefixes": [ "[variables('vnetPrefix')]" ] },
+        "subnets": [
+          {
+            "name": "[variables('snetFuncName')]",
+            "properties": {
+              "addressPrefix": "[variables('snetFuncPrefix')]",
+              "defaultOutboundAccess": "[not(parameters('natGateway'))]",
+              "networkSecurityGroup": { "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgFuncName'))]" },
+              "natGateway": "[if(parameters('natGateway'), createObject('id', resourceId('Microsoft.Network/natGateways', variables('natName'))), null())]",
+              "delegations": [
+                {
+                  "name": "flex-consumption",
+                  "properties": { "serviceName": "Microsoft.App/environments" }
+                }
+              ]
+            }
+          },
+          {
+            "name": "[variables('snetPeName')]",
+            "properties": {
+              "addressPrefix": "[variables('snetPePrefix')]",
+              "defaultOutboundAccess": false,
+              "privateEndpointNetworkPolicies": "Enabled",
+              "networkSecurityGroup": { "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgPeName'))]" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "comments": "Datalagring: felanmalningar (bild + JSON) och kontrakt. Ingen publik atkomst, inga atkomstnycklar (bara Entra ID), nas via private endpoint.",
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('dataStorageName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "kind": "StorageV2",
+      "sku": { "name": "[parameters('dataSku')]" },
+      "properties": {
+        "accessTier": "Hot",
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": false,
+        "minimumTlsVersion": "TLS1_2",
+        "supportsHttpsTrafficOnly": true,
+        "publicNetworkAccess": "[if(empty(parameters('adminIpAdress')), 'Disabled', 'Enabled')]",
+        "networkAcls": {
+          "bypass": "None",
+          "defaultAction": "Deny",
+          "ipRules": "[variables('dataIpRegler')]",
+          "virtualNetworkRules": []
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('dataStorageName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('dataStorageName'))]"
+      ],
+      "properties": {
+        "deleteRetentionPolicy": { "enabled": true, "days": 14 },
+        "containerDeleteRetentionPolicy": { "enabled": true, "days": 14 }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('dataStorageName'), '/default/', variables('containerFelanmalan'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices', variables('dataStorageName'), 'default')]"
+      ],
+      "properties": { "publicAccess": "None" }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('dataStorageName'), '/default/', variables('containerKontrakt'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices', variables('dataStorageName'), 'default')]"
+      ],
+      "properties": { "publicAccess": "None" }
+    },
+    {
+      "comments": "Livscykel: kontrakt och gamla anmalningar flyttas till Cool efter 90 dagar (lases sallan). Anmalningar raderas efter tre ar (dataminimering, personuppgifter).",
+      "type": "Microsoft.Storage/storageAccounts/managementPolicies",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('dataStorageName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('dataStorageName'))]"
+      ],
+      "properties": {
+        "policy": {
+          "rules": [
+            {
+              "enabled": true,
+              "name": "kontrakt-till-cool",
+              "type": "Lifecycle",
+              "definition": {
+                "filters": {
+                  "blobTypes": [ "blockBlob" ],
+                  "prefixMatch": [ "[concat(variables('containerKontrakt'), '/')]" ]
+                },
+                "actions": {
+                  "baseBlob": {
+                    "tierToCool": { "daysAfterModificationGreaterThan": 90 }
+                  }
+                }
+              }
+            },
+            {
+              "enabled": true,
+              "name": "felanmalningar-cool-och-radering",
+              "type": "Lifecycle",
+              "definition": {
+                "filters": {
+                  "blobTypes": [ "blockBlob" ],
+                  "prefixMatch": [ "[concat(variables('containerFelanmalan'), '/')]" ]
+                },
+                "actions": {
+                  "baseBlob": {
+                    "tierToCool": { "daysAfterModificationGreaterThan": 90 },
+                    "delete": { "daysAfterModificationGreaterThan": 1095 }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "comments": "Function-appens egen lagring for kodpaket och korningsdata. Inga personuppgifter, bara Entra ID-atkomst.",
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[variables('hostStorageName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "kind": "StorageV2",
+      "sku": { "name": "[variables('hostStorageSku')]" },
+      "properties": {
+        "accessTier": "Hot",
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": false,
+        "minimumTlsVersion": "TLS1_2",
+        "supportsHttpsTrafficOnly": true,
+        "publicNetworkAccess": "Enabled",
+        "networkAcls": {
+          "bypass": "AzureServices",
+          "defaultAction": "Allow"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('hostStorageName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('hostStorageName'))]"
+      ],
+      "properties": {
+        "deleteRetentionPolicy": { "enabled": false }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(variables('hostStorageName'), '/default/', variables('containerAppPaket'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices', variables('hostStorageName'), 'default')]"
+      ],
+      "properties": { "publicAccess": "None" }
+    },
+    {
+      "comments": "Privat DNS-zon sa att datalagringens namn pekar pa private endpointens privata IP inne i VNet:et.",
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "[variables('privateDnsZoneName')]",
+      "location": "global",
+      "tags": "[variables('taggar')]"
+    },
+    {
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[concat(variables('privateDnsZoneName'), '/link-', variables('vnetName'))]",
+      "location": "global",
+      "tags": "[variables('taggar')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ],
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": { "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]" }
+      }
+    },
+    {
+      "comments": "Private endpoint for blob-tjansten i datalagringen.",
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('peName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('dataStorageName'))]"
+      ],
+      "properties": {
+        "subnet": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('snetPeName'))]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "blob",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.Storage/storageAccounts', variables('dataStorageName'))]",
+              "groupIds": [ "blob" ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[concat(variables('peName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', variables('peName'))]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneName'))]"
+      ],
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "blob",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneName'))]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "comments": "Flex Consumption-plan: skalar till noll nattetid och ut vid toppar.",
+      "type": "Microsoft.Web/serverfarms",
+      "apiVersion": "2024-04-01",
+      "name": "[variables('planName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "kind": "functionapp",
+      "sku": {
+        "tier": "FlexConsumption",
+        "name": "FC1"
+      },
+      "properties": {
+        "reserved": true,
+        "zoneRedundant": "[parameters('zonRedundans')]"
+      }
+    },
+    {
+      "comments": "Portalen: Function App med systemtilldelad managed identity och VNet-integration.",
+      "type": "Microsoft.Web/sites",
+      "apiVersion": "2024-04-01",
+      "name": "[variables('funcName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('taggar')]",
+      "kind": "functionapp,linux",
+      "identity": { "type": "SystemAssigned" },
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/serverfarms', variables('planName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('hostStorageName'), 'default', variables('containerAppPaket'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ],
+      "properties": {
+        "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('planName'))]",
+        "httpsOnly": true,
+        "virtualNetworkSubnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('snetFuncName'))]",
+        "siteConfig": {
+          "minTlsVersion": "1.2",
+          "ftpsState": "Disabled",
+          "http20Enabled": true
+        },
+        "functionAppConfig": {
+          "deployment": {
+            "storage": {
+              "type": "blobContainer",
+              "value": "[concat(reference(resourceId('Microsoft.Storage/storageAccounts', variables('hostStorageName')), '2023-05-01').primaryEndpoints.blob, variables('containerAppPaket'))]",
+              "authentication": { "type": "SystemAssignedIdentity" }
+            }
+          },
+          "scaleAndConcurrency": {
+            "maximumInstanceCount": "[parameters('maxInstanser')]",
+            "instanceMemoryMB": "[parameters('instansMinne')]"
+          },
+          "runtime": {
+            "name": "python",
+            "version": "[parameters('pythonVersion')]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/sites/basicPublishingCredentialsPolicies",
+      "apiVersion": "2024-04-01",
+      "name": "[concat(variables('funcName'), '/ftp')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites', variables('funcName'))]"
+      ],
+      "properties": { "allow": false }
+    },
+    {
+      "comments": "Appens identitet: Storage Blob Data Owner pa sin egen hostlagring (kodpaket, lease-hantering).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[concat('Microsoft.Storage/storageAccounts/', variables('hostStorageName'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', variables('hostStorageName')), variables('funcName'), variables('rollBlobDataOwner'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites', variables('funcName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('hostStorageName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('rollBlobDataOwner'))]",
+        "principalId": "[reference(resourceId('Microsoft.Web/sites', variables('funcName')), '2024-04-01', 'full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Appens identitet: Storage Blob Data Contributor ENBART pa containern felanmalningar, inte pa kontrakten (least privilege).",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[concat('Microsoft.Storage/storageAccounts/', variables('dataStorageName'), '/blobServices/default/containers/', variables('containerFelanmalan'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('dataStorageName'), 'default', variables('containerFelanmalan')), variables('funcName'), variables('rollBlobDataContributor'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites', variables('funcName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('dataStorageName'), 'default', variables('containerFelanmalan'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('rollBlobDataContributor'))]",
+        "principalId": "[reference(resourceId('Microsoft.Web/sites', variables('funcName')), '2024-04-01', 'full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "comments": "Forvaltare: hanterar anmalningar och kontrakt (lasa och skriva blobbar) i datalagringen.",
+      "condition": "[not(empty(parameters('forvaltareGroupId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[concat('Microsoft.Storage/storageAccounts/', variables('dataStorageName'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', variables('dataStorageName')), parameters('forvaltareGroupId'), variables('rollBlobDataContributor'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('dataStorageName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('rollBlobDataContributor'))]",
+        "principalId": "[parameters('forvaltareGroupId')]",
+        "principalType": "Group"
+      }
+    },
+    {
+      "comments": "Ekonomi: lasande insyn i kontrakten.",
+      "condition": "[not(empty(parameters('ekonomiGroupId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[concat('Microsoft.Storage/storageAccounts/', variables('dataStorageName'), '/blobServices/default/containers/', variables('containerKontrakt'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('dataStorageName'), 'default', variables('containerKontrakt')), parameters('ekonomiGroupId'), variables('rollBlobDataReader'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('dataStorageName'), 'default', variables('containerKontrakt'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('rollBlobDataReader'))]",
+        "principalId": "[parameters('ekonomiGroupId')]",
+        "principalType": "Group"
+      }
+    },
+    {
+      "comments": "Ekonomi: kostnadsinsyn for resursgruppen, filtrerbar per tagg (fastighet, avdelning).",
+      "condition": "[not(empty(parameters('ekonomiGroupId')))]",
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[guid(resourceGroup().id, parameters('ekonomiGroupId'), variables('rollCostManagementReader'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('rollCostManagementReader'))]",
+        "principalId": "[parameters('ekonomiGroupId')]",
+        "principalType": "Group"
+      }
+    },
+    {
+      "comments": "Appinstallningar. Skapas efter rolltilldelningarna sa att appen har behorighet nar den startar.",
+      "type": "Microsoft.Web/sites/config",
+      "apiVersion": "2024-04-01",
+      "name": "[concat(variables('funcName'), '/appsettings')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites', variables('funcName'))]",
+        "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts', variables('hostStorageName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts', variables('hostStorageName')), variables('funcName'), variables('rollBlobDataOwner')))]",
+        "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('dataStorageName'), 'default', variables('containerFelanmalan')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('dataStorageName'), 'default', variables('containerFelanmalan')), variables('funcName'), variables('rollBlobDataContributor')))]",
+        "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('privateDnsZoneName'), concat('link-', variables('vnetName')))]",
+        "[resourceId('Microsoft.Network/privateEndpoints/privateDnsZoneGroups', variables('peName'), 'default')]"
+      ],
+      "properties": {
+        "AzureWebJobsStorage__accountName": "[variables('hostStorageName')]",
+        "AzureWebJobsStorage__credential": "managedidentity",
+        "DATA_STORAGE_URL": "[variables('dataBlobUrl')]",
+        "CONTAINER_FELANMALAN": "[variables('containerFelanmalan')]",
+        "FLOW_URL": "[parameters('flowUrl')]",
+        "KRAV_INLOGGNING": "[if(empty(parameters('authClientId')), 'false', 'true')]",
+        "AKUTA_KATEGORIER": "[variables('akutaKategorier')]",
+        "MAX_BILD_MB": "10",
+        "MILJO": "[parameters('miljo')]"
+      }
+    },
+    {
+      "comments": "Inloggning med Entra ID (App Service Authentication). Bara inloggade anvandare nar portalen; /halsa ar undantagen for overvakning.",
+      "condition": "[not(empty(parameters('authClientId')))]",
+      "type": "Microsoft.Web/sites/config",
+      "apiVersion": "2024-04-01",
+      "name": "[concat(variables('funcName'), '/authsettingsV2')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites/config', variables('funcName'), 'appsettings')]"
+      ],
+      "properties": {
+        "platform": { "enabled": true },
+        "globalValidation": {
+          "requireAuthentication": true,
+          "unauthenticatedClientAction": "RedirectToLoginPage",
+          "redirectToProvider": "azureactivedirectory",
+          "excludedPaths": [ "/halsa" ]
+        },
+        "identityProviders": {
+          "azureActiveDirectory": {
+            "enabled": true,
+            "registration": {
+              "clientId": "[parameters('authClientId')]",
+              "openIdIssuer": "[concat(environment().authentication.loginEndpoint, subscription().tenantId, '/v2.0')]"
+            },
+            "validation": {
+              "allowedAudiences": [ "[parameters('authClientId')]" ]
+            }
+          }
+        },
+        "login": {
+          "tokenStore": { "enabled": false }
+        },
+        "httpSettings": {
+          "requireHttps": true
+        }
+      }
+    },
+    {
+      "comments": "Kostnadsbudget med larm vid 80 % faktisk och 100 % prognostiserad kostnad.",
+      "condition": "[not(empty(parameters('budgetEpost')))]",
+      "type": "Microsoft.Consumption/budgets",
+      "apiVersion": "2021-10-01",
+      "name": "[variables('budgetName')]",
+      "properties": {
+        "category": "Cost",
+        "amount": "[parameters('budgetBelopp')]",
+        "timeGrain": "Monthly",
+        "timePeriod": { "startDate": "[parameters('budgetStartdatum')]" },
+        "notifications": {
+          "Faktisk80": {
+            "enabled": true,
+            "operator": "GreaterThan",
+            "threshold": 80,
+            "thresholdType": "Actual",
+            "contactEmails": [ "[parameters('budgetEpost')]" ]
+          },
+          "Prognos100": {
+            "enabled": true,
+            "operator": "GreaterThan",
+            "threshold": 100,
+            "thresholdType": "Forecasted",
+            "contactEmails": [ "[parameters('budgetEpost')]" ]
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "funktionsapp": {
+      "type": "string",
+      "value": "[variables('funcName')]"
+    },
+    "portalUrl": {
+      "type": "string",
+      "value": "[concat('https://', reference(resourceId('Microsoft.Web/sites', variables('funcName')), '2024-04-01').defaultHostName, '/felanmalan')]"
+    },
+    "hostnamn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Web/sites', variables('funcName')), '2024-04-01').defaultHostName]"
+    },
+    "dataLagring": {
+      "type": "string",
+      "value": "[variables('dataStorageName')]"
+    },
+    "hostLagring": {
+      "type": "string",
+      "value": "[variables('hostStorageName')]"
+    },
+    "appIdentitet": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Web/sites', variables('funcName')), '2024-04-01', 'full').identity.principalId]"
+    },
+    "inloggningAktiv": {
+      "type": "bool",
+      "value": "[not(empty(parameters('authClientId')))]"
+    }
+  }
+}
