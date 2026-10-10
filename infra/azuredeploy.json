@@ -147,6 +147,7 @@
     "dataBlobUrl": "[concat('https://', variables('dataStorageName'), '.blob.', environment().suffixes.storage, '/')]",
 
     "peName": "[concat('pe-nordvik-blob', variables('suffix'))]",
+    "peNicName": "[concat('nic-nordvik-pe', variables('suffix'))]",
     "privateDnsZoneName": "[concat('privatelink.blob.', environment().suffixes.storage)]",
 
     "planName": "[concat('asp-nordvik-felanmalan', variables('suffix'))]",
@@ -524,6 +525,7 @@
         "[resourceId('Microsoft.Storage/storageAccounts', variables('dataStorageName'))]"
       ],
       "properties": {
+        "customNetworkInterfaceName": "[variables('peNicName')]",
         "subnet": {
           "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('snetPeName'))]"
         },
