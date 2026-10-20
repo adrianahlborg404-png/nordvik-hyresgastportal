@@ -1,0 +1,183 @@
+Översikt för rg-nordvik, 2026-10-10 13:48
+
+================================================================
+  RESURSGRUPP: alla resurser
+================================================================
+Namn                                                 Typ                                                    Plats
+---------------------------------------------------  -----------------------------------------------------  -------------
+nic-nordvik-pe                                       Microsoft.Network/networkInterfaces                    swedencentral
+nsg-nordvik-func                                     Microsoft.Network/networkSecurityGroups                swedencentral
+nsg-nordvik-pe                                       Microsoft.Network/networkSecurityGroups                swedencentral
+privatelink.blob.core.windows.net                    Microsoft.Network/privateDnsZones                      global
+privatelink.blob.core.windows.net/link-vnet-nordvik  Microsoft.Network/privateDnsZones/virtualNetworkLinks  global
+pe-nordvik-blob                                      Microsoft.Network/privateEndpoints                     swedencentral
+vnet-nordvik                                         Microsoft.Network/virtualNetworks                      swedencentral
+stnordvikadrianahlborg02                             Microsoft.Storage/storageAccounts                      swedencentral
+stnordvikadrianahlborg01                             Microsoft.Storage/storageAccounts                      swedencentral
+asp-nordvik-felanmalan                               Microsoft.Web/serverFarms                              swedencentral
+func-nordvik-felanmalan-adrianahlborg                Microsoft.Web/sites                                    swedencentral
+
+================================================================
+  1 COMPUTE: Function App på Flex Consumption
+================================================================
+Adress: func-nordvik-felanmalan-adrianahlborg.azurewebsites.net
+BaraHttps: true
+MaxInstanser: 40
+MinneMB: 2048
+Namn: func-nordvik-felanmalan-adrianahlborg
+Plan: FlexConsumption
+Runtime: python 3.11
+Status: Running
+
+--- Plan
+Namn                    Sku    Niva
+----------------------  -----  ---------------
+asp-nordvik-felanmalan  FC1    FlexConsumption
+
+--- Hälsokontroll /halsa
+
+
+================================================================
+  2 IAM: identiteter och behörigheter
+================================================================
+
+--- Function-appens managed identity
+Typ             ObjectId
+--------------  ------------------------------------
+SystemAssigned  e0d51edb-1a88-4a31-8a12-9bfb8dff445a
+
+--- Inloggning med Entra ID (App Service Authentication)
+Aktiverad    InloggningKravs    OinloggadeSkickasTill    Undantag
+-----------  -----------------  -----------------------  ----------
+True         True               azureactivedirectory     /halsa
+
+--- Entra ID-grupper
+Grupp                   Beskrivning
+----------------------  --------------------------------------------------------
+grp-nordvik-ekonomi     Nordvik ekonomi: läsande insyn i kontrakt och kostnader
+grp-nordvik-forvaltare  Nordvik förvaltare: hanterar felanmälningar och kontrakt
+
+--- Appregistrering för inloggningen
+Namn                    AppId                                 Inloggning
+----------------------  ------------------------------------  ------------
+app-nordvik-felanmalan  a6e713d5-c39e-4440-b19e-94c594a6bd91  AzureADMyOrg
+
+--- Rolltilldelningar (least privilege)
+Roll                           Vem                                   Typ               Omfang
+-----------------------------  ------------------------------------  ----------------  -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Cost Management Reader         grp-nordvik-ekonomi                   Group             /subscriptions/.../resourcegroups/rg-nordvik
+Storage Blob Data Contributor  grp-nordvik-forvaltare                Group             /subscriptions/.../resourcegroups/rg-nordvik/providers/Microsoft.Storage/storageAccounts/stnordvikadrianahlborg01
+Storage Blob Data Reader       grp-nordvik-ekonomi                   Group             /subscriptions/.../resourcegroups/rg-nordvik/providers/Microsoft.Storage/storageAccounts/stnordvikadrianahlborg01/blobServices/default/containers/kontrakt
+Storage Blob Data Owner        57148f06-ed5c-4f43-9a22-0a3ea3604c7c  ServicePrincipal  /subscriptions/.../resourcegroups/rg-nordvik/providers/Microsoft.Storage/storageAccounts/stnordvikadrianahlborg02
+Storage Blob Data Contributor  57148f06-ed5c-4f43-9a22-0a3ea3604c7c  ServicePrincipal  /subscriptions/.../resourcegroups/rg-nordvik/providers/Microsoft.Storage/storageAccounts/stnordvikadrianahlborg01/blobServices/default/containers/felanmalningar
+
+================================================================
+  3 NÄTVERK OCH SÄKERHET
+================================================================
+
+--- VNet och subnät
+Subnat             Adresser      HarNsg    Delegering                  PrivatUtgaende
+-----------------  ------------  --------  --------------------------  ----------------
+snet-nordvik-func  10.40.1.0/26  True      Microsoft.App/environments  False
+snet-nordvik-pe    10.40.2.0/27  True                                  True
+
+--- NSG-regler
+NSG               Regel                         Prio    Riktning    Atkomst    Fran          Till          Port
+----------------  ----------------------------  ------  ----------  ---------  ------------  ------------  ------
+nsg-nordvik-func  Allow-Out-Https-Till-Lagring  100     Outbound    Allow      10.40.1.0/26  10.40.2.0/27  443
+nsg-nordvik-func  Allow-Out-Https-Internet      110     Outbound    Allow      10.40.1.0/26  Internet      443
+nsg-nordvik-func  Deny-Out-Internet-Ovrigt      4000    Outbound    Deny       *             Internet      *
+nsg-nordvik-func  Deny-In-Internet              4000    Inbound     Deny       Internet      *             *
+NSG             Regel                     Prio    Riktning    Atkomst    Fran          Till          Port
+--------------  ------------------------  ------  ----------  ---------  ------------  ------------  ------
+nsg-nordvik-pe  Allow-In-Https-Fran-Func  100     Inbound     Allow      10.40.1.0/26  10.40.2.0/27  443
+nsg-nordvik-pe  Deny-In-Allt-Annat        4000    Inbound     Deny       *             *             *
+
+--- VNet-integration för Function-appen
+/subscriptions/.../resourceGroups/rg-nordvik/providers/Microsoft.Network/virtualNetworks/vnet-nordvik/subnets/snet-nordvik-func
+
+--- Private endpoint
+Namn             Status    Tjanst
+---------------  --------  --------
+pe-nordvik-blob  Approved  blob
+Natverkskort    PrivatIP
+--------------  ----------
+nic-nordvik-pe  10.40.2.4
+
+--- Privat DNS: lagringens namn pekar på det privata IP:t
+Namn                      IP
+------------------------  ---------
+stnordvikadrianahlborg01  10.40.2.4
+
+--- Försök att nå lagringen från internet (ska misslyckas)
+  Blockerad, som förväntat: ERROR:  The request may be blocked by network rules of storage account. Please check network rule set using 'az storage 
+
+================================================================
+  4 STORAGE
+================================================================
+
+--- Lagringskonto stnordvikadrianahlborg01
+Sku           PubliktNatverk    PublikaBlobbar    Atkomstnycklar    MinTls    BaraHttps
+------------  ----------------  ----------------  ----------------  --------  -----------
+Standard_ZRS  Disabled          False             False             TLS1_2    True
+Container       PublikAtkomst
+--------------  ---------------
+felanmalningar  None
+kontrakt        None
+
+--- Lagringskonto stnordvikadrianahlborg02
+Sku           PubliktNatverk    PublikaBlobbar    Atkomstnycklar    MinTls    BaraHttps
+------------  ----------------  ----------------  ----------------  --------  -----------
+Standard_LRS  Enabled           False             False             TLS1_2    True
+Container              PublikAtkomst
+---------------------  ---------------
+app-package            None
+azure-webjobs-hosts    None
+azure-webjobs-secrets  None
+
+--- Livscykelregler för stnordvikadrianahlborg01
+Regel                             Prefix           TillCoolEfterDagar    RaderasEfterDagar
+--------------------------------  ---------------  --------------------  -------------------
+kontrakt-till-cool                kontrakt/        90.0
+felanmalningar-cool-och-radering  felanmalningar/  90.0                  1095.0
+
+--- Mjuk radering för stnordvikadrianahlborg01
+BlobbarDagar    ContainrarDagar
+--------------  -----------------
+14              14
+
+================================================================
+  5 IaC: deployer från ARM-templaten
+================================================================
+Deploy                   Status     Tid
+-----------------------  ---------  --------------------------------
+nordvik-20261010-120427  Succeeded  2026-10-10T12:06:15.817899+00:00
+nordvik-20261010-120636  Succeeded  2026-10-10T12:07:53.548436+00:00
+nordvik-20261010-130313  Failed     2026-10-10T13:03:37.748956+00:00
+nordvik-20261010-130310  Succeeded  2026-10-10T13:04:24.778306+00:00
+
+================================================================
+  KOSTNAD OCH UPPFÖLJNING
+================================================================
+
+--- Taggar per resurs
+Namn                                                 Miljo    Avdelning    Fastighet    Projekt
+---------------------------------------------------  -------  -----------  -----------  ---------------
+stnordvikadrianahlborg02                             prod     forvaltning  gemensam     hyresgastportal
+stnordvikadrianahlborg01                             prod     forvaltning  gemensam     hyresgastportal
+asp-nordvik-felanmalan                               prod     forvaltning  gemensam     hyresgastportal
+privatelink.blob.core.windows.net                    prod     forvaltning  gemensam     hyresgastportal
+nsg-nordvik-func                                     prod     forvaltning  gemensam     hyresgastportal
+nsg-nordvik-pe                                       prod     forvaltning  gemensam     hyresgastportal
+vnet-nordvik                                         prod     forvaltning  gemensam     hyresgastportal
+pe-nordvik-blob                                      prod     forvaltning  gemensam     hyresgastportal
+func-nordvik-felanmalan-adrianahlborg                prod     forvaltning  gemensam     hyresgastportal
+nic-nordvik-pe                                       prod     forvaltning  gemensam     hyresgastportal
+privatelink.blob.core.windows.net/link-vnet-nordvik  prod     forvaltning  gemensam     hyresgastportal
+
+--- Budget
+Budget          Belopp    Period    Larm
+--------------  --------  --------  ---------------------
+budget-nordvik  2500.0    Monthly   faktisk80, prognos100
+
+Klart.

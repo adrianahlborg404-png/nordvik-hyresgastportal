@@ -326,6 +326,8 @@ scripts/
   verifiera.sh                      kontrollerar delmomenten (OK/FEL)
   oversikt.sh                       skriver ut hela konfigurationen som text
   ta-bort.sh                        tar bort en miljö
+docs/
+  oversikt.txt                      utdata från oversikt.sh för prod, 2026-10-10
 ```
 
 ---
