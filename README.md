@@ -1,6 +1,6 @@
 # Nordvik Fastigheter AB – hyresgästportal med felanmälan
 
-Detta Repo är en sammanfattning av https://github.com/adrianahlborg404-png/Azure-novatrix-mov25
+Detta Repo är en sammanfattning av https://github.com/adrianahlborg404-png/azure-novatrix
 
 En hyresgäst loggar in, fyller i en felanmälan (rubrik, beskrivning och en bild) och skickar in den. Anmälan sparas privat i Azure, hamnar i en SharePoint-lista, ger en notis i Teams och, för akuta kategorier (värme, vatten, lås), ett mejl med hög prioritet till ansvarig förvaltare.
 
