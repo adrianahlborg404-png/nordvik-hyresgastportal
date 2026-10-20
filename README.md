@@ -6,26 +6,31 @@ En hyresgäst loggar in, fyller i en felanmälan (rubrik, beskrivning och en bil
 
 Den här guiden visar hur du sätter upp hela lösningen i din egen Azure-prenumeration och Microsoft 365-tenant. Azure-delen byggs med ett kommando från repot. Microsoft 365-delen tar ungefär 20 minuter att klicka ihop.
 
-*Slutuppgift (uppgift 8, v41) i kursen Microsoft Azure, Adrian Ahlborg.*
+> Slutuppgift i kursen Microsoft Azure inom utbildningen Moln- och virtualiseringsspecialist, Campus Mölndal.
+
+**Teknik:** Azure Functions (Flex Consumption) · ARM-templates · Entra ID · Managed identity · VNet · NSG · Private endpoint · Blob Storage · Power Automate · SharePoint · Teams · Outlook · Python · Bash
 
 ---
 
 ## Innehåll
 
 1. [Arkitektur](#arkitektur)
-2. [Det här behöver du](#det-här-behöver-du)
-3. [Steg 1 – Hämta repot i Cloud Shell](#steg-1--hämta-repot-i-cloud-shell)
-4. [Steg 2 – Ställ in parameterfilen](#steg-2--ställ-in-parameterfilen)
-5. [Steg 3 – Deploya Azure-delen](#steg-3--deploya-azure-delen)
-6. [Steg 4 – Testa portalen](#steg-4--testa-portalen)
-7. [Steg 5 – Microsoft 365: Teams och SharePoint](#steg-5--microsoft-365-teams-och-sharepoint)
-8. [Steg 6 – Power Automate-flödet](#steg-6--power-automate-flödet)
-9. [Steg 7 – Koppla flödet till portalen](#steg-7--koppla-flödet-till-portalen)
-10. [Steg 8 – Testa hela kedjan](#steg-8--testa-hela-kedjan)
-11. [Test- eller demomiljö](#test--eller-demomiljö)
-12. [Felsökning](#felsökning)
-13. [Repo-struktur](#repo-struktur)
-14. [Designval](#designval)
+2. [Så ser det ut](#så-ser-det-ut)
+3. [Det här behöver du](#det-här-behöver-du)
+4. [Steg 1 – Hämta repot i Cloud Shell](#steg-1--hämta-repot-i-cloud-shell)
+5. [Steg 2 – Ställ in parameterfilen](#steg-2--ställ-in-parameterfilen)
+6. [Steg 3 – Deploya Azure-delen](#steg-3--deploya-azure-delen)
+7. [Steg 4 – Testa portalen](#steg-4--testa-portalen)
+8. [Steg 5 – Microsoft 365: Teams och SharePoint](#steg-5--microsoft-365-teams-och-sharepoint)
+9. [Steg 6 – Power Automate-flödet](#steg-6--power-automate-flödet)
+10. [Steg 7 – Koppla flödet till portalen](#steg-7--koppla-flödet-till-portalen)
+11. [Steg 8 – Testa hela kedjan](#steg-8--testa-hela-kedjan)
+12. [Test- eller demomiljö](#test--eller-demomiljö)
+13. [Felsökning](#felsökning)
+14. [Repo-struktur](#repo-struktur)
+15. [Designval](#designval)
+16. [Avgränsningar](#avgränsningar)
+17. [Vad jag lärde mig](#vad-jag-lärde-mig)
 
 ---
 
@@ -65,6 +70,19 @@ flowchart LR
 | NSG ×2 | `nsg-nordvik-func`, `nsg-nordvik-pe` | Filtrering per subnät |
 | Private endpoint + DNS | `pe-nordvik-blob`, `nic-nordvik-pe`, `privatelink.blob.core.windows.net` | Privat väg till datalagringen |
 | Budget | `budget-nordvik` | Larm vid 80 % och prognos 100 % |
+
+---
+
+## Så ser det ut
+
+![Hyresgästen fyller i en akut felanmälan](docs/bilder/01-formular.png)
+*Hyresgästen är inloggad och fyller i en felanmälan med kategori, adress och bild.*
+
+![Power Automate-flödet efter en lyckad körning](docs/bilder/02-flode-korning.png)
+*Flödet tar emot anmälan, skapar en rad i SharePoint, slår upp förvaltaren och postar i Teams.*
+
+![Mejl med hög prioritet till förvaltaren](docs/bilder/03-outlook-akut.png)
+*Akuta kategorier ger dessutom ett mejl med hög prioritet till ansvarig förvaltare.*
 
 ---
 
@@ -330,6 +348,7 @@ scripts/
   ta-bort.sh                        tar bort en miljö
 docs/
   oversikt.txt                      utdata från oversikt.sh för prod, 2026-10-10
+  bilder/                           skärmdumpar till README
 ```
 
 ---
@@ -368,3 +387,19 @@ docs/
 - SharePoint-listor och flödet skapas i portalen. Flödet versionshanteras som exporterat paket i `flow/`.
 - Förvaltarna hanterar ärenden i SharePoint-listan, inte i portalen.
 - Ingen Application Insights. Övervakning sker via `/halsa` och plattformens loggar.
+
+---
+
+## Vad jag lärde mig
+
+**Att bygga allt som kod tvingade mig att förstå hur delarna hänger ihop.** En private endpoint räcker inte ensam: den behöver en privat DNS-zon, en länk till VNet:et och en zongrupp innan namnet pekar på rätt IP. Flex Consumption kräver ett delegerat subnät och en egen resursprovider. I portalen hade det mesta skett i bakgrunden, men i ARM-templaten måste varje del finnas med.
+
+**Att säkerheten styr designen.** När lagringen låstes bakom en private endpoint kunde Power Automate inte längre nå den. Därför skickar portalen uppgifterna till flödet i stället för att flödet hämtar dem. Med managed identity och `allowSharedKeyAccess: false` finns det heller inga nycklar som kan läcka.
+
+**Att least privilege är mer arbete men gör lösningen begriplig.** Varje roll har ett skäl och ett så litet omfång som möjligt, ner till en enskild container. Det gör det lätt att förklara vem som får göra vad.
+
+**Att felsöka genom att läsa felet och verifiera med skript.** Två deployer samtidigt gav en konflikt på DNS-zonen, och ett nätverkskort fick ett autogenererat namn tills jag satte namnet i templaten. När rolltabellen i `verifiera.sh` kom tillbaka tom visade det sig att Azure skriver resursgruppens namn med små bokstäver i sökvägen, så filtret behövde ändras. Att kontrollera med kod i stället för att klicka runt i portalen gick både snabbare och säkrare.
+
+**Att parametrar gör miljön återskapbar.** Med en parameterfil per miljö kunde jag bygga en likadan testmiljö, verifiera den och riva den igen med två kommandon.
+
+**Att uppgiften är en del av en större kedja.** I verklig drift hade hyresgästerna loggat in via Entra External ID och kopplats till sin lägenhet, och deployen hade skett via en pipeline med övervakning. Projektet täcker plattformen som allt det vilar på.
